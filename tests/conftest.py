@@ -21,6 +21,13 @@ INSTALLED_APPS.append("tests")
 if "mezzanine.accounts" not in INSTALLED_APPS:
     INSTALLED_APPS.append("mezzanine.accounts")
 
+# Install the twitter app so its models can be tested. It is appended
+# after "tests" so that the stub tests/templates/twitter/tweets.html
+# overrides the real panel template, keeping page rendering tests
+# away from the Twitter API.
+if "mezzanine.twitter" not in INSTALLED_APPS:
+    INSTALLED_APPS.append("mezzanine.twitter")
+
 # Use the MD5 password hasher by default for quicker test runs.
 PASSWORD_HASHERS = ('django.contrib.auth.hashers.MD5PasswordHasher',)
 """
