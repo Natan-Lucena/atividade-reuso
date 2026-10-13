@@ -1,11 +1,11 @@
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import quote
 
 import requests
 from django.db import models
 from django.utils.html import urlize
-from django.utils.timezone import make_aware, utc
+from django.utils.timezone import make_aware
 from django.utils.translation import gettext_lazy as _
 from requests_oauthlib import OAuth1
 
@@ -131,7 +131,7 @@ class Query(models.Model):
             chars = [ch for ch in tweet.text if ord(ch) < 0x800]
             tweet.text = "".join(chars)
         d = datetime.strptime(tweet_json["created_at"], TWEET_DATE_FORMAT)
-        tweet.created_at = make_aware(d, utc)
+        tweet.created_at = make_aware(d, timezone.utc)
         try:
             tweet.save()
         except Warning:
