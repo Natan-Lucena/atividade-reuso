@@ -12,6 +12,7 @@ from unittest import mock
 
 from mezzanine.twitter import QUERY_TYPE_LIST, QUERY_TYPE_SEARCH, QUERY_TYPE_USER
 from mezzanine.twitter.models import Query, TwitterQueryException
+from mezzanine.twitter.strategies import STRATEGIES, QueryStrategy
 from mezzanine.utils.tests import TestCase
 
 AUTH = ("consumer-key", "consumer-secret", "token-key", "token-secret")
@@ -157,3 +158,23 @@ class TwitterQueryTests(TestCase):
                 with self.assertRaises(TwitterQueryException) as raised:
                     query.run()
         self.assertEqual(str(raised.exception), "Error retrieving: connection refused")
+
+    def test_new_query_type_only_needs_a_strategy(self):
+        """
+        Extensibility gained with the Strategy pattern: a new type of
+        query is supported by registering a strategy, without touching
+        ``Query.run()``.
+        """
+
+        class FakeStrategy(QueryStrategy):
+            def build_url(self, value):
+                return "https://example.com/fake?q=%s" % value
+
+            def extract_tweets(self, payload):
+                return payload["items"]
+
+        with mock.patch.dict(STRATEGIES, {"fake": FakeStrategy()}):
+            query = Query.objects.create(type="fake", value="x")
+            get = self.run_query(query, {"items": [tweet_json(1), tweet_json(2)]})
+        self.assertEqual(self.requested_url(get), "https://example.com/fake?q=x")
+        self.assertEqual(query.tweets.count(), 2)
