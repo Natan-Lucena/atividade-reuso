@@ -22,10 +22,19 @@ class BaseGenericRelation(GenericRelation):
       calculated value can be stored against the custom fields since
       aggregates aren't available for GenericRelation instances.
 
+    ``related_items_changed`` is a template method: it fixes the
+    algorithm (calculate the denormalised values, apply them to the
+    instance, persist the instance) and subclasses only provide the
+    varying step by implementing ``calculate_values``.
+
     """
 
     # Mapping of field names to model fields that will be added.
     fields = {}
+
+    # Persistence policy hook: when ``True`` the instance is only saved
+    # if at least one of the calculated values actually changed.
+    save_only_if_changed = False
 
     def __init__(self, *args, **kwargs):
         """
@@ -115,12 +124,43 @@ class BaseGenericRelation(GenericRelation):
 
     def related_items_changed(self, instance, related_manager):
         """
-        Can be implemented by subclasses - called whenever the
-        state of related items change, eg they're saved or deleted.
-        The instance for this field and the related manager for the
-        field are passed as arguments.
+        Template method called whenever the state of related items
+        change, eg they're saved or deleted. The instance for this
+        field and the related manager for the field are passed as
+        arguments. Runs the fixed sequence of steps:
+
+        1. ``calculate_values`` (hook implemented by subclasses);
+        2. ``apply_values`` (common: store each value on the instance);
+        3. save the instance, according to ``save_only_if_changed``.
         """
-        pass
+        values = self.calculate_values(instance, related_manager)
+        changed = self.apply_values(instance, values)
+        if changed or not self.save_only_if_changed:
+            instance.save()
+
+    def calculate_values(self, instance, related_manager):
+        """
+        Hook for subclasses: return a dict mapping each field name
+        template declared in ``fields`` (eg ``"%s_count"``) to the
+        value that should be stored on the instance.
+        """
+        raise NotImplementedError(
+            "%s must implement calculate_values()" % self.__class__.__name__
+        )
+
+    def apply_values(self, instance, values):
+        """
+        Store each calculated value on the instance, resolving the
+        field name templates against ``related_field_name``. Returns
+        ``True`` if any value differs from the one currently stored.
+        """
+        changed = False
+        for name_template, value in values.items():
+            field_name = name_template % self.related_field_name
+            if getattr(instance, field_name) != value:
+                setattr(instance, field_name, value)
+                changed = True
+        return changed
 
     def value_from_object(self, obj):
         """
@@ -140,9 +180,9 @@ class CommentsField(BaseGenericRelation):
     default_related_model = "generic.ThreadedComment"
     fields = {"%s_count": IntegerField(editable=False, default=0)}
 
-    def related_items_changed(self, instance, related_manager):
+    def calculate_values(self, instance, related_manager):
         """
-        Stores the number of comments. A custom ``count_filter``
+        Calculates the number of comments. A custom ``count_filter``
         queryset gets checked for, allowing managers to implement
         custom count logic.
         """
@@ -150,9 +190,7 @@ class CommentsField(BaseGenericRelation):
             count = related_manager.count_queryset()
         except AttributeError:
             count = related_manager.count()
-        count_field_name = list(self.fields.keys())[0] % self.related_field_name
-        setattr(instance, count_field_name, count)
-        instance.save()
+        return {"%s_count": count}
 
 
 class KeywordsField(BaseGenericRelation):
@@ -164,6 +202,8 @@ class KeywordsField(BaseGenericRelation):
 
     default_related_model = "generic.AssignedKeyword"
     fields = {"%s_string": CharField(editable=False, blank=True, max_length=500)}
+    # Only hit the database when the keywords string actually changed.
+    save_only_if_changed = True
 
     def __init__(self, *args, **kwargs):
         """
@@ -230,16 +270,13 @@ class KeywordsField(BaseGenericRelation):
                 del cls.search_fields[name]
                 cls.search_fields[string_field_name] = weight
 
-    def related_items_changed(self, instance, related_manager):
+    def calculate_values(self, instance, related_manager):
         """
-        Stores the keywords as a single string for searching.
+        Joins the keywords into a single string for searching.
         """
         assigned = related_manager.select_related("keyword")
         keywords = " ".join(str(a.keyword) for a in assigned)
-        string_field_name = list(self.fields.keys())[0] % self.related_field_name
-        if getattr(instance, string_field_name) != keywords:
-            setattr(instance, string_field_name, keywords)
-            instance.save()
+        return {"%s_string": keywords}
 
 
 class RatingField(BaseGenericRelation):
@@ -256,15 +293,12 @@ class RatingField(BaseGenericRelation):
         "%s_average": FloatField(default=0, editable=False),
     }
 
-    def related_items_changed(self, instance, related_manager):
+    def calculate_values(self, instance, related_manager):
         """
-        Calculates and saves the average rating.
+        Calculates the rating count, sum and average.
         """
         ratings = [r.value for r in related_manager.all()]
         count = len(ratings)
         _sum = sum(ratings)
         average = _sum / count if count > 0 else 0
-        setattr(instance, "%s_count" % self.related_field_name, count)
-        setattr(instance, "%s_sum" % self.related_field_name, _sum)
-        setattr(instance, "%s_average" % self.related_field_name, average)
-        instance.save()
+        return {"%s_count": count, "%s_sum": _sum, "%s_average": average}

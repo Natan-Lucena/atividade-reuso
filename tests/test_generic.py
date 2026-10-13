@@ -207,3 +207,40 @@ class GenericTests(TestCase):
         self.assertIn("brown", values_from_relation[1])
 
         self.assertEqual(("", ""), keyword_widget.decompress(None))
+
+    def test_generic_relation_template_method(self):
+        """
+        ``BaseGenericRelation.related_items_changed`` is a template
+        method: subclasses only implement ``calculate_values`` and the
+        base class applies the values and decides whether to save.
+        """
+        from mezzanine.generic.fields import (
+            BaseGenericRelation,
+            CommentsField,
+            KeywordsField,
+            RatingField,
+        )
+
+        # Subclasses declare the varying step only.
+        page = RichTextPage.objects.create(title="template method")
+        keyword_id = Keyword.objects.get_or_create(title="brown")[0].id
+        page.keywords.get_or_create(keyword_id=keyword_id)
+        field = RichTextPage._meta.get_field("keywords")
+        values = field.calculate_values(page, page.keywords)
+        self.assertEqual(values, {"%s_string": "brown"})
+
+        # Applying resolves the name templates and reports changes.
+        page.keywords_string = ""
+        self.assertTrue(field.apply_values(page, values))
+        self.assertEqual(page.keywords_string, "brown")
+        self.assertFalse(field.apply_values(page, values))
+
+        # Persistence policy lives in the base class, not in each subclass.
+        self.assertTrue(KeywordsField.save_only_if_changed)
+        self.assertFalse(CommentsField.save_only_if_changed)
+        self.assertFalse(RatingField.save_only_if_changed)
+
+        # The hook is abstract.
+        with self.assertRaises(NotImplementedError):
+            BaseGenericRelation.calculate_values(field, page, page.keywords)
+        page.delete()
