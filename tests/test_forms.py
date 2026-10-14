@@ -18,6 +18,7 @@ from mezzanine.forms.field_factories import (
 )
 from mezzanine.forms.forms import FormForForm
 from mezzanine.forms.models import Field, Form, FormEntry
+from mezzanine.forms.services import FormSubmissionService
 from mezzanine.forms.signals import form_invalid, form_valid
 from mezzanine.utils.tests import TestCase
 
@@ -376,3 +377,17 @@ class TestsFormSubmission(TestCase):
         self.assertEqual(mail.outbox, [])
         self.assertEqual(self.valid, [])
         self.assertEqual(self.invalid, [])
+
+    def test_service_can_be_used_outside_page_processor(self):
+        page, email_key = self.create_form(
+            send_email=True, email_copies="copia@example.com"
+        )
+        request = self._request_factory.post("/api/", {email_key: "a@example.com"})
+        form = FormForForm(page, RequestContext(request), request.POST)
+        self.assertTrue(form.is_valid())
+        service = FormSubmissionService(request, page, form)
+        self.assertFalse(service.is_spam("/api/"))
+        entry = service.submit()
+        self.assertEqual(entry.form, page)
+        self.assertEqual(len(mail.outbox), 2)
+        self.assertEqual(self.valid[0]["entry"], entry)
