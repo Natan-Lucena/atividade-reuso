@@ -1,7 +1,9 @@
 from datetime import datetime
-from unittest import skipUnless
+from unittest import mock, skipUnless
 
 from django import forms
+from django.core import mail
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.template import RequestContext
 from django.test import override_settings
 
@@ -15,8 +17,13 @@ from mezzanine.forms.field_factories import (
     get_factory,
 )
 from mezzanine.forms.forms import FormForForm
-from mezzanine.forms.models import Field, Form
+from mezzanine.forms.models import Field, Form, FormEntry
+from mezzanine.forms.signals import form_invalid, form_valid
 from mezzanine.utils.tests import TestCase
+
+
+def always_spam(request, form, url):
+    return True
 
 
 class TestsForm(TestCase):
@@ -253,3 +260,119 @@ class TestsFormFieldFactories(TestCase):
         request = self._request_factory.get("/")
         form = FormForForm(form_page, RequestContext(request))
         self.assertEqual(form.initial["field_%s" % field.id], "ABC")
+
+
+class TestsFormSubmission(TestCase):
+    """
+    Caracteriza o processamento de uma submissao pelo page processor
+    ``form_processor``: persistencia, e-mails, anexos, sinais e spam.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.valid = []
+        self.invalid = []
+
+        def on_valid(sender, **kwargs):
+            self.valid.append(kwargs)
+
+        def on_invalid(sender, **kwargs):
+            self.invalid.append(kwargs)
+
+        form_valid.connect(on_valid, weak=False)
+        form_invalid.connect(on_invalid, weak=False)
+        self.addCleanup(form_valid.disconnect, on_valid)
+        self.addCleanup(form_invalid.disconnect, on_invalid)
+
+    def create_form(self, **kwargs):
+        kwargs.setdefault("title", "Contato")
+        kwargs.setdefault("status", CONTENT_STATUS_PUBLISHED)
+        form = Form.objects.create(**kwargs)
+        email = form.fields.create(label="Email", field_type=fields.EMAIL)
+        return form, "field_%s" % email.id
+
+    def test_valid_submission_saves_entry_sends_emails_and_signal(self):
+        form, email_key = self.create_form(
+            send_email=True,
+            email_copies="copia@example.com",
+            email_subject="Assunto",
+            email_from="site@example.com",
+        )
+        response = self.client.post(
+            form.get_absolute_url(), {email_key: "alguem@example.com"}
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response["Location"].endswith("?sent=1"))
+        self.assertEqual(FormEntry.objects.count(), 1)
+        entry = FormEntry.objects.get()
+        self.assertEqual(entry.fields.get().value, "alguem@example.com")
+        self.assertEqual(len(mail.outbox), 2)
+        to_sender, copies = mail.outbox
+        self.assertEqual(to_sender.to, ["alguem@example.com"])
+        self.assertEqual(to_sender.subject, "Assunto")
+        self.assertEqual(to_sender.from_email, "site@example.com")
+        self.assertEqual(copies.to, ["copia@example.com"])
+        self.assertEqual(copies.extra_headers["Reply-To"], "alguem@example.com")
+        self.assertEqual(len(self.valid), 1)
+        self.assertEqual(self.valid[0]["entry"], entry)
+        self.assertEqual(self.invalid, [])
+
+    def test_default_subject_and_sender(self):
+        form, email_key = self.create_form(send_email=True)
+        self.client.post(form.get_absolute_url(), {email_key: "alguem@example.com"})
+        entry = FormEntry.objects.get()
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].subject, f"{form.title} - {entry.entry_time}")
+        self.assertEqual(mail.outbox[0].from_email, settings.DEFAULT_FROM_EMAIL)
+
+    def test_send_email_disabled_only_sends_copies(self):
+        form, email_key = self.create_form(
+            send_email=False, email_copies="a@example.com, b@example.com"
+        )
+        self.client.post(form.get_absolute_url(), {email_key: "alguem@example.com"})
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["a@example.com", "b@example.com"])
+
+    def test_copies_receive_uploaded_file_as_attachment(self):
+        form, email_key = self.create_form(
+            send_email=False, email_copies="copia@example.com"
+        )
+        upload = form.fields.create(
+            label="Arquivo", field_type=fields.FILE, required=False
+        )
+        data = {
+            email_key: "alguem@example.com",
+            "field_%s" % upload.id: SimpleUploadedFile("cv.txt", b"conteudo"),
+        }
+        with mock.patch("mezzanine.forms.forms.fs.save", return_value="cv.txt"):
+            self.client.post(form.get_absolute_url(), data)
+        self.assertEqual(len(mail.outbox), 1)
+        name, content = mail.outbox[0].attachments[0][:2]
+        # Django decodifica anexos text/* para str.
+        if isinstance(content, str):
+            content = content.encode()
+        self.assertEqual((name, content), ("cv.txt", b"conteudo"))
+
+    def test_invalid_submission_fires_form_invalid(self):
+        form, email_key = self.create_form(send_email=True)
+        response = self.client.post(form.get_absolute_url(), {email_key: "x"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(FormEntry.objects.count(), 0)
+        self.assertEqual(mail.outbox, [])
+        self.assertEqual(len(self.invalid), 1)
+        self.assertEqual(self.valid, [])
+
+    @override_settings(SPAM_FILTERS=("tests.test_forms.always_spam",))
+    def test_spam_redirects_without_saving_or_signals(self):
+        form, email_key = self.create_form(
+            send_email=True, email_copies="copia@example.com"
+        )
+        response = self.client.post(
+            form.get_absolute_url(), {email_key: "alguem@example.com"}
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response["Location"].endswith("?sent=1"))
+        self.assertEqual(FormEntry.objects.count(), 0)
+        self.assertEqual(mail.outbox, [])
+        self.assertEqual(self.valid, [])
+        self.assertEqual(self.invalid, [])
