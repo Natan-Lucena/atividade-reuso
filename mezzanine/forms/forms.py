@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date
 from os.path import join, split
 from uuid import uuid4
 
@@ -13,6 +13,7 @@ from django.utils.translation import gettext as _
 
 from mezzanine.conf import settings
 from mezzanine.forms import fields
+from mezzanine.forms.field_factories import get_factory
 from mezzanine.forms.models import FieldEntry, FormEntry
 from mezzanine.utils.email import split_addresses as split_choices
 
@@ -135,25 +136,7 @@ class FormForForm(forms.ModelForm):
         # Create the form fields.
         for field in self.form_fields:
             field_key = "field_%s" % field.id
-            field_class = fields.CLASSES[field.field_type]
-            field_widget = fields.WIDGETS.get(field.field_type)
-            field_args = {
-                "label": field.label,
-                "required": field.required,
-                "help_text": field.help_text,
-            }
-            arg_names = field_class.__init__.__code__.co_varnames
-            if "max_length" in arg_names:
-                field_args["max_length"] = settings.FORMS_FIELD_MAX_LENGTH
-            if "choices" in arg_names:
-                choices = list(field.get_choices())
-                if field.field_type == fields.SELECT and field.default not in [
-                    c[0] for c in choices
-                ]:
-                    choices.insert(0, ("", field.placeholder_text))
-                field_args["choices"] = choices
-            if field_widget is not None:
-                field_args["widget"] = field_widget
+            factory = get_factory(field.field_type)
             #
             #   Initial value for field, in order of preference:
             #
@@ -174,29 +157,8 @@ class FormForForm(forms.ModelForm):
                 except KeyError:
                     initial_val = str(Template(field.default).render(context))
             if initial_val:
-                if field.is_a(*fields.MULTIPLE):
-                    initial_val = split_choices(initial_val)
-                elif field.field_type == fields.CHECKBOX:
-                    initial_val = initial_val != "False"
-                self.initial[field_key] = initial_val
-            self.fields[field_key] = field_class(**field_args)
-
-            if field.field_type == fields.DOB:
-                _now = datetime.now()
-                years = list(range(_now.year, _now.year - 120, -1))
-                self.fields[field_key].widget.years = years
-
-            # Add identifying type attr to the field for styling.
-            setattr(self.fields[field_key], "type", field_class.__name__.lower())
-            if (
-                field.required
-                and settings.FORMS_USE_HTML5
-                and field.field_type != fields.CHECKBOX_MULTIPLE
-            ):
-                self.fields[field_key].widget.attrs["required"] = ""
-            if field.placeholder_text and not field.default:
-                text = field.placeholder_text
-                self.fields[field_key].widget.attrs["placeholder"] = text
+                self.initial[field_key] = factory.clean_initial(field, initial_val)
+            self.fields[field_key] = factory.create(field)
 
     def save(self, **kwargs):
         """
