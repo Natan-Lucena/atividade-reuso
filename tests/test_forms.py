@@ -8,8 +8,14 @@ from django.test import override_settings
 from mezzanine.conf import settings
 from mezzanine.core.models import CONTENT_STATUS_PUBLISHED
 from mezzanine.forms import fields
+from mezzanine.forms.field_factories import (
+    DEFAULT_FACTORY,
+    FACTORIES,
+    FormFieldFactory,
+    get_factory,
+)
 from mezzanine.forms.forms import FormForForm
-from mezzanine.forms.models import Form
+from mezzanine.forms.models import Field, Form
 from mezzanine.utils.tests import TestCase
 
 
@@ -196,3 +202,54 @@ class TestsFormFieldCreation(TestCase):
         self.assertIsInstance(form_field, CustomField)
         self.assertEqual(form_field.type, "customfield")
         self.assertEqual(form_field.max_length, settings.FORMS_FIELD_MAX_LENGTH)
+
+
+class TestsFormFieldFactories(TestCase):
+    """
+    Testes unitarios das fabricas de ``mezzanine.forms.field_factories``.
+    """
+
+    def test_select_factory_inserts_placeholder_first(self):
+        field = Field(
+            label="F", field_type=fields.SELECT, choices="a, b", placeholder_text="P"
+        )
+        form_field = get_factory(fields.SELECT).create(field)
+        self.assertEqual(list(form_field.choices)[0], ("", "P"))
+
+    def test_dob_factory_sets_120_years(self):
+        field = Field(label="F", field_type=fields.DOB)
+        form_field = get_factory(fields.DOB).create(field)
+        self.assertEqual(len(form_field.widget.years), 120)
+
+    def test_checkbox_factory_cleans_false_initial(self):
+        field = Field(label="F", field_type=fields.CHECKBOX)
+        factory = get_factory(fields.CHECKBOX)
+        self.assertIs(factory.clean_initial(field, "False"), False)
+        self.assertIs(factory.clean_initial(field, "on"), True)
+
+    @override_settings(FORMS_USE_HTML5=True)
+    def test_checkbox_multiple_factory_skips_html5_required(self):
+        field = Field(
+            label="F", field_type=fields.CHECKBOX_MULTIPLE, choices="a", required=True
+        )
+        form_field = get_factory(fields.CHECKBOX_MULTIPLE).create(field)
+        self.assertNotIn("required", form_field.widget.attrs)
+
+    def test_unknown_type_uses_default_factory(self):
+        self.assertIs(get_factory(99), DEFAULT_FACTORY)
+        self.assertIs(get_factory(fields.TEXT), DEFAULT_FACTORY)
+
+    def test_custom_factory_registered_without_touching_form(self):
+        class UpperFactory(FormFieldFactory):
+            def clean_initial(self, field, value):
+                return value.upper()
+
+        self.addCleanup(FACTORIES.pop, fields.TEXT, None)
+        FACTORIES[fields.TEXT] = UpperFactory()
+        form_page = Form.objects.create(title="Custom factory")
+        field = form_page.fields.create(
+            label="F", field_type=fields.TEXT, default="abc"
+        )
+        request = self._request_factory.get("/")
+        form = FormForForm(form_page, RequestContext(request))
+        self.assertEqual(form.initial["field_%s" % field.id], "ABC")
