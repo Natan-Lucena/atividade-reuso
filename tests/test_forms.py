@@ -1,7 +1,9 @@
+from datetime import datetime
 from unittest import skipUnless
 
 from django import forms
 from django.template import RequestContext
+from django.test import override_settings
 
 from mezzanine.conf import settings
 from mezzanine.core.models import CONTENT_STATUS_PUBLISHED
@@ -103,3 +105,94 @@ class TestsForm(TestCase):
 
         self.assertTrue(form.is_valid())
         self.assertEqual(form.email_to(), test_email)
+
+
+class TestsFormFieldCreation(TestCase):
+    """
+    Caracteriza como ``FormForForm`` cria cada campo Django a partir do
+    ``field_type`` do ``mezzanine.forms.models.Field``.
+    """
+
+    def build(self, **field_kwargs):
+        form_page = Form.objects.create(title="Field creation")
+        field_kwargs.setdefault("label", "Field")
+        field = form_page.fields.create(**field_kwargs)
+        request = self._request_factory.get("/")
+        form = FormForForm(form_page, RequestContext(request))
+        key = "field_%s" % field.id
+        return form.fields[key], form.initial.get(key)
+
+    def test_select_gets_placeholder_choice_when_default_not_in_choices(self):
+        form_field, _ = self.build(
+            field_type=fields.SELECT, choices="a, b", placeholder_text="Escolha"
+        )
+        self.assertEqual(
+            list(form_field.choices), [("", "Escolha"), ("a", "a"), ("b", "b")]
+        )
+
+    def test_select_without_placeholder_choice_when_default_in_choices(self):
+        form_field, initial = self.build(
+            field_type=fields.SELECT, choices="a, b", default="b"
+        )
+        self.assertEqual(list(form_field.choices), [("a", "a"), ("b", "b")])
+        self.assertEqual(initial, "b")
+
+    def test_radio_never_gets_placeholder_choice(self):
+        form_field, _ = self.build(field_type=fields.RADIO_MULTIPLE, choices="a, b")
+        self.assertEqual(list(form_field.choices), [("a", "a"), ("b", "b")])
+
+    def test_char_fields_get_max_length(self):
+        form_field, _ = self.build(field_type=fields.TEXT)
+        self.assertEqual(form_field.max_length, settings.FORMS_FIELD_MAX_LENGTH)
+        self.assertEqual(form_field.type, "charfield")
+
+    def test_dob_widget_has_120_years(self):
+        form_field, _ = self.build(field_type=fields.DOB)
+        years = list(form_field.widget.years)
+        self.assertEqual(len(years), 120)
+        self.assertEqual(years[0], datetime.now().year)
+
+    def test_checkbox_initial_is_converted_to_boolean(self):
+        _, initial = self.build(field_type=fields.CHECKBOX, default="False")
+        self.assertIs(initial, False)
+        _, initial = self.build(field_type=fields.CHECKBOX, default="True")
+        self.assertIs(initial, True)
+
+    def test_multiple_initial_is_split_into_list(self):
+        for field_type in fields.MULTIPLE:
+            _, initial = self.build(
+                field_type=field_type, choices="a, b, c", default="a, c"
+            )
+            self.assertEqual(initial, ["a", "c"])
+
+    def test_placeholder_only_without_default(self):
+        form_field, _ = self.build(field_type=fields.TEXT, placeholder_text="Nome")
+        self.assertEqual(form_field.widget.attrs["placeholder"], "Nome")
+        form_field, _ = self.build(
+            field_type=fields.TEXT, placeholder_text="Nome", default="x"
+        )
+        self.assertNotIn("placeholder", form_field.widget.attrs)
+
+    @override_settings(FORMS_USE_HTML5=True)
+    def test_html5_required_except_checkbox_multiple(self):
+        form_field, _ = self.build(field_type=fields.TEXT, required=True)
+        self.assertEqual(form_field.widget.attrs["required"], "")
+        form_field, _ = self.build(
+            field_type=fields.CHECKBOX_MULTIPLE, choices="a, b", required=True
+        )
+        self.assertNotIn("required", form_field.widget.attrs)
+
+    def test_no_html5_required_by_default(self):
+        form_field, _ = self.build(field_type=fields.TEXT, required=True)
+        self.assertNotIn("required", form_field.widget.attrs)
+
+    def test_extra_field_type_uses_registered_class(self):
+        class CustomField(forms.CharField):
+            pass
+
+        fields.CLASSES[99] = CustomField
+        self.addCleanup(fields.CLASSES.pop, 99)
+        form_field, _ = self.build(field_type=99)
+        self.assertIsInstance(form_field, CustomField)
+        self.assertEqual(form_field.type, "customfield")
+        self.assertEqual(form_field.max_length, settings.FORMS_FIELD_MAX_LENGTH)
